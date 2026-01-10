@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.mp3
+*.pdf
+.env
+audio.*
+output.*
+test_output.pdf
+test_pdf.py
