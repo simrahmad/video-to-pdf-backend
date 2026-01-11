@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: video-to-pdf-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt && wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip && unzip vosk-model-small-en-us-0.15.zip && mv vosk-model-small-en-us-0.15 model"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 1"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: GMAIL_USER
+        value: simrahapp@gmail.com
+      - key: GMAIL_APP_PASSWORD
+        value: abzqxqsrnavbgvta

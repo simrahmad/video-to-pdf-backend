@@ -1,7 +1,6 @@
 flask==3.0.0
 yt-dlp==2024.12.23
-openai-whisper==20231117
+vosk==0.3.45
 reportlab==4.0.7
 yagmail==0.15.293
 gunicorn==21.2.0
-torch==2.1.0

@@ -1,72 +1,97 @@
 from flask import Flask, request, jsonify
 import yt_dlp
-import whisper
+from vosk import Model, KaldiRecognizer
+import wave
+import json
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 import yagmail
 import os
+from werkzeug.utils import secure_filename
+import subprocess
 
 app = Flask(__name__)
 
-# Load Whisper model
-print("Loading Whisper model... This may take a minute...")
-model = whisper.load_model("base")
-print("Model loaded successfully!")
+# Load Vosk model
+print("Loading Vosk model...")
+MODEL_PATH = "model"
+if not os.path.exists(MODEL_PATH):
+    print("ERROR: Model not found! Please download vosk-model-small-en-us-0.15")
+    print("From: https://alphacephei.com/vosk/models")
+    exit(1)
 
-@app.route("/convert", methods=["POST"])
-def convert_video():
-    data = request.json
-    video_url = data.get("video_url")
-    email = data.get("email")
-    
-    if not video_url or not email:
-        return jsonify({"status": "error", "message": "Video URL or email missing"}), 400
+model = Model(MODEL_PATH)
+print("Vosk model loaded successfully!")
 
+# Configure upload folder
+UPLOAD_FOLDER = 'uploads'
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
+
+ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def transcribe_audio(audio_file):
+    """Transcribe audio using Vosk"""
     try:
-        print(f"Processing video: {video_url}")
+        # Convert to WAV 16kHz mono (Vosk requirement)
+        wav_file = "temp_audio.wav"
+        subprocess.run([
+            'ffmpeg', '-i', audio_file,
+            '-ar', '16000', '-ac', '1', '-y', wav_file
+        ], check=True, capture_output=True)
         
-        # 1️⃣ Download audio from video
-        print("Downloading audio...")
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": "audio.%(ext)s",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-            "quiet": True
-        }
+        # Transcribe with Vosk
+        wf = wave.open(wav_file, "rb")
+        rec = KaldiRecognizer(model, wf.getframerate())
+        rec.SetWords(True)
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+        transcription = []
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                if 'text' in result:
+                    transcription.append(result['text'])
         
-        audio_file = "audio.mp3"
-        print("Audio downloaded successfully!")
+        # Final result
+        final_result = json.loads(rec.FinalResult())
+        if 'text' in final_result:
+            transcription.append(final_result['text'])
+        
+        wf.close()
+        os.remove(wav_file)
+        
+        full_text = ' '.join(transcription)
+        print(f"Transcription: {full_text[:100]}...")
+        return full_text
+        
+    except Exception as e:
+        print(f"Transcription error: {str(e)}")
+        raise
 
-        # 2️⃣ Convert speech to text using Whisper
+def process_video_to_pdf(audio_file, email):
+    """Common function to process audio and send PDF"""
+    try:
+        # Convert speech to text using Vosk
         print("Transcribing audio to text...")
-        result = model.transcribe(audio_file)
-        text = result["text"]
+        text = transcribe_audio(audio_file)
         print(f"Transcription complete! Length: {len(text)} characters")
 
-        # 3️⃣ Create PDF from text
+        if not text or len(text.strip()) < 10:
+            text = "Error: Could not extract meaningful text from the audio. Please ensure the video has clear speech."
+
+        # Create PDF from text
         print("Creating PDF...")
         pdf_file = "output.pdf"
         
-        print(f"Original text length: {len(text)} characters")
-        print(f"First 100 chars: {text[:100]}")  # Debug
-        
-        # Better text cleaning
-        clean_text = text.replace('\x00', '')
-        clean_text = clean_text.strip()
-        
-        if not clean_text:
-            clean_text = "Error: No text could be extracted from the video."
-            print("WARNING: Extracted text was empty!")
-        
-        print(f"Cleaned text length: {len(clean_text)} characters")
+        # Clean text
+        clean_text = text.replace('\x00', '').strip()
         
         # Create PDF with ReportLab
         doc = SimpleDocTemplate(pdf_file, pagesize=letter,
@@ -92,33 +117,155 @@ def convert_video():
         story.append(para)
         
         doc.build(story)
-        print(f"PDF created successfully!")
+        print("PDF created successfully!")
 
-        # 4️⃣ Send email with PDF attachment
+        # Send email with PDF attachment
         print(f"Sending email to {email}...")
-        yag = yagmail.SMTP("simrahahmad@gmail.com", "ynggciubjxnhelcn")
-        yag.send(
+        gmail_user = os.environ.get("GMAIL_USER", "simrahapp@gmail.com")
+        gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "abzqxqsrnavbgvta")
+        yag = yagmail.SMTP(gmail_user, gmail_password)
+         yag.send(
             to=email,
-            subject="Your Video Transcript PDF",
-            contents="Here is your PDF transcript from the video.",
+            subject="Your Video Transcript is Ready! 📄",
+            contents="""Hello!
+
+Your video transcript has been successfully converted to PDF.
+
+Please find your PDF document attached to this email.
+
+Thank you for using Video to PDF Converter!
+
+Best regards,
+Video to PDF Team
+""",
             attachments=pdf_file
         )
         print("Email sent successfully!")
 
-        # 5️⃣ Clean up files
-        os.remove(audio_file)
-        os.remove(pdf_file)
+        # Clean up files
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        if os.path.exists(pdf_file):
+            os.remove(pdf_file)
+        
+        return True, "PDF sent to email successfully!"
+        
+    except Exception as e:
+        print(f"Error in processing: {str(e)}")
+        # Clean up on error
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        return False, str(e)
 
-        return jsonify({"status": "success", "message": "PDF sent to email successfully!"})
+@app.route("/convert", methods=["POST"])
+def convert_video():
+    """Convert video from URL"""
+    data = request.json
+    video_url = data.get("video_url")
+    email = data.get("email")
+    
+    if not video_url or not email:
+        return jsonify({"status": "error", "message": "Video URL or email missing"}), 400
+
+    try:
+        print(f"Processing video: {video_url}")
+        
+        # Download audio from video
+        print("Downloading audio...")
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": "audio.%(ext)s",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "quiet": True
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+        
+        audio_file = "audio.mp3"
+        print("Audio downloaded successfully!")
+
+        # Process and send
+        success, message = process_video_to_pdf(audio_file, email)
+        
+        if success:
+            return jsonify({"status": "success", "message": message})
+        else:
+            return jsonify({"status": "error", "message": message}), 500
 
     except Exception as e:
         print(f"Error: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route("/convert-upload", methods=["POST"])
+def convert_upload():
+    """Convert uploaded video file"""
+    email = request.form.get("email")
+    
+    if not email:
+        return jsonify({"status": "error", "message": "Email missing"}), 400
+    
+    if 'video' not in request.files:
+        return jsonify({"status": "error", "message": "No video file uploaded"}), 400
+    
+    video_file = request.files['video']
+    
+    if video_file.filename == '':
+        return jsonify({"status": "error", "message": "No video file selected"}), 400
+    
+    if not allowed_file(video_file.filename):
+        return jsonify({"status": "error", "message": "Invalid file type. Allowed: mp4, avi, mov, mkv, webm, flv"}), 400
+    
+    try:
+        print(f"Processing uploaded video: {video_file.filename}")
+        
+        # Save uploaded video
+        filename = secure_filename(video_file.filename)
+        video_path = os.path.join(UPLOAD_FOLDER, filename)
+        video_file.save(video_path)
+        print(f"Video saved to: {video_path}")
+        
+        # Extract audio from video
+        print("Extracting audio...")
+        audio_file = "uploaded_audio.mp3"
+        
+        subprocess.run([
+            'ffmpeg', '-i', video_path,
+            '-vn', '-acodec', 'libmp3lame',
+            '-q:a', '2', audio_file, '-y'
+        ], check=True, capture_output=True)
+        
+        print("Audio extracted successfully!")
+        
+        # Process and send
+        success, message = process_video_to_pdf(audio_file, email)
+        
+        # Clean up uploaded video
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        
+        if success:
+            return jsonify({"status": "success", "message": message})
+        else:
+            return jsonify({"status": "error", "message": message}), 500
+            
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        # Clean up on error
+        if os.path.exists(video_path):
+            os.remove(video_path)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running!"})
+    return jsonify({"status": "success", "message": "Backend is running with Vosk!"})
 
 if __name__ == "__main__":
-    print("Starting Flask server on http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting Flask server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
