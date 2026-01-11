@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import yt_dlp
+import requests
 from vosk import Model, KaldiRecognizer
 import wave
 import json
@@ -10,6 +10,7 @@ import yagmail
 import os
 from werkzeug.utils import secure_filename
 import subprocess
+import time
 
 app = Flask(__name__)
 
@@ -33,6 +34,65 @@ ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def download_youtube_with_cobalt(video_url):
+    """Download YouTube video using cobalt.tools API (bypasses bot detection)"""
+    try:
+        print(f"Downloading YouTube video via Cobalt API: {video_url}")
+        
+        # Use cobalt.tools API (free service that bypasses YouTube bot detection)
+        cobalt_api = "https://api.cobalt.tools/api/json"
+        
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "url": video_url,
+            "vCodec": "h264",
+            "vQuality": "720",
+            "aFormat": "mp3",
+            "isAudioOnly": True
+        }
+        
+        # Request download from cobalt
+        response = requests.post(cobalt_api, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code != 200:
+            print(f"Cobalt API error: {response.status_code}")
+            return None
+        
+        data = response.json()
+        print(f"Cobalt response: {data}")
+        
+        # Get the audio download URL
+        if data.get("status") == "redirect" or data.get("status") == "stream":
+            audio_url = data.get("url")
+            if not audio_url:
+                print("No audio URL in Cobalt response")
+                return None
+            
+            # Download the audio file
+            print(f"Downloading audio from: {audio_url}")
+            audio_response = requests.get(audio_url, timeout=60)
+            
+            if audio_response.status_code == 200:
+                audio_file = "audio.mp3"
+                with open(audio_file, 'wb') as f:
+                    f.write(audio_response.content)
+                print(f"Audio downloaded successfully: {audio_file}")
+                return audio_file
+            else:
+                print(f"Failed to download audio: {audio_response.status_code}")
+                return None
+        else:
+            print(f"Cobalt API returned unexpected status: {data.get('status')}")
+            return None
+            
+    except Exception as e:
+        print(f"Error downloading with Cobalt: {str(e)}")
+        return None
 
 def transcribe_audio(audio_file):
     """Transcribe audio using Vosk"""
@@ -170,55 +230,40 @@ def convert_video():
     try:
         print(f"Processing video: {video_url}")
         
-        # Download audio from video with improved YouTube bypass
-        print("Downloading audio...")
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": "audio.%(ext)s",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "wav",
-                "preferredquality": "192",
-            }],
-            "quiet": True,
-            "no_warnings": True,
-            "nocheckcertificate": True,
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "referer": "https://www.google.com/",
-            "http_headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-us,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1"
-            },
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web"],
-                    "player_skip": ["webpage", "configs"],
-                    "skip": ["dash", "hls"]
-                }
-            },
-            # Additional options to bypass bot detection
-            "geo_bypass": True,
-            "age_limit": None,
-        }
+        # Check if it's a YouTube URL
+        is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
-        
-        # Find the downloaded audio file
-        audio_file = None
-        for ext in ['mp3', 'wav', 'webm', 'm4a']:
-            if os.path.exists(f"audio.{ext}"):
-                audio_file = f"audio.{ext}"
-                break
-        
-        if not audio_file:
-            return jsonify({"status": "error", "message": "Failed to download audio from video"}), 500
-        
-        print(f"Audio downloaded successfully: {audio_file}")
+        if is_youtube:
+            # Use Cobalt API for YouTube (bypasses bot detection)
+            print("Detected YouTube URL, using Cobalt API...")
+            audio_file = download_youtube_with_cobalt(video_url)
+            
+            if not audio_file:
+                return jsonify({
+                    "status": "error", 
+                    "message": "Failed to download YouTube video. The video may be restricted or private. Please try: 1) A different public video, 2) Using the Upload feature instead."
+                }), 500
+        else:
+            # For non-YouTube URLs, try direct download
+            print("Non-YouTube URL, attempting direct download...")
+            try:
+                response = requests.get(video_url, timeout=60, stream=True)
+                if response.status_code == 200:
+                    audio_file = "audio.mp4"
+                    with open(audio_file, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    print("Direct download successful!")
+                else:
+                    return jsonify({
+                        "status": "error", 
+                        "message": f"Failed to download video. HTTP {response.status_code}"
+                    }), 500
+            except Exception as e:
+                return jsonify({
+                    "status": "error", 
+                    "message": f"Failed to download video: {str(e)}"
+                }), 500
 
         # Process and send
         success, message = process_video_to_pdf(audio_file, email)
@@ -231,14 +276,6 @@ def convert_video():
     except Exception as e:
         error_msg = str(e)
         print(f"Error: {error_msg}")
-        
-        # Check if it's a YouTube bot detection error
-        if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
-            return jsonify({
-                "status": "error", 
-                "message": "YouTube bot protection detected. This video may be restricted. Please try: 1) A different video, 2) Using the Upload feature instead, or 3) Try again in a few minutes."
-            }), 500
-        
         return jsonify({"status": "error", "message": error_msg}), 500
 
 @app.route("/convert-upload", methods=["POST"])
@@ -310,7 +347,7 @@ def home():
         "endpoints": {
             "/": "API information (this page)",
             "/test": "Test endpoint to check if backend is running",
-            "/convert": "POST - Convert YouTube video URL to PDF",
+            "/convert": "POST - Convert YouTube video URL to PDF (via Cobalt API)",
             "/convert-upload": "POST - Convert uploaded video file to PDF"
         },
         "usage": {
@@ -318,7 +355,7 @@ def home():
                 "method": "POST",
                 "content_type": "application/json",
                 "body": {
-                    "video_url": "YouTube video URL",
+                    "video_url": "YouTube video URL or direct video link",
                     "email": "Email address to receive PDF"
                 }
             },
@@ -332,20 +369,21 @@ def home():
             }
         },
         "features": [
-            "YouTube video downloading",
+            "YouTube video downloading (via Cobalt API - bypasses bot detection)",
+            "Direct video URL support",
             "Device video upload support",
             "AI-powered speech-to-text (Vosk)",
             "Professional PDF generation",
             "Email delivery",
             "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV"
         ],
-        "powered_by": "Vosk AI + Flask + ReportLab",
+        "powered_by": "Cobalt.tools + Vosk AI + Flask + ReportLab",
         "github": "https://github.com/simrahmad/video-to-pdf-backend"
     })
 
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running with Vosk!"})
+    return jsonify({"status": "success", "message": "Backend is running with Vosk and Cobalt API!"})
 
 if __name__ == "__main__":
     import os
