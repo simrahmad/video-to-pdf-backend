@@ -170,7 +170,7 @@ def convert_video():
     try:
         print(f"Processing video: {video_url}")
         
-        # Download audio from video
+        # Download audio from video with improved YouTube bypass
         print("Downloading audio...")
         ydl_opts = {
             "format": "bestaudio/best",
@@ -181,21 +181,44 @@ def convert_video():
                 "preferredquality": "192",
             }],
             "quiet": True,
-            "nocheckcertificate": True,
             "no_warnings": True,
+            "nocheckcertificate": True,
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "referer": "https://www.google.com/",
+            "http_headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-us,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            },
             "extractor_args": {
                 "youtube": {
+                    "player_client": ["android", "web"],
+                    "player_skip": ["webpage", "configs"],
                     "skip": ["dash", "hls"]
                 }
-            }
+            },
+            # Additional options to bypass bot detection
+            "geo_bypass": True,
+            "age_limit": None,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
         
-        audio_file = "audio.mp3"
-        print("Audio downloaded successfully!")
+        # Find the downloaded audio file
+        audio_file = None
+        for ext in ['mp3', 'wav', 'webm', 'm4a']:
+            if os.path.exists(f"audio.{ext}"):
+                audio_file = f"audio.{ext}"
+                break
+        
+        if not audio_file:
+            return jsonify({"status": "error", "message": "Failed to download audio from video"}), 500
+        
+        print(f"Audio downloaded successfully: {audio_file}")
 
         # Process and send
         success, message = process_video_to_pdf(audio_file, email)
@@ -206,8 +229,17 @@ def convert_video():
             return jsonify({"status": "error", "message": message}), 500
 
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        error_msg = str(e)
+        print(f"Error: {error_msg}")
+        
+        # Check if it's a YouTube bot detection error
+        if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
+            return jsonify({
+                "status": "error", 
+                "message": "YouTube bot protection detected. This video may be restricted. Please try: 1) A different video, 2) Using the Upload feature instead, or 3) Try again in a few minutes."
+            }), 500
+        
+        return jsonify({"status": "error", "message": error_msg}), 500
 
 @app.route("/convert-upload", methods=["POST"])
 def convert_upload():
