@@ -124,7 +124,7 @@ def process_video_to_pdf(audio_file, email):
         gmail_user = os.environ.get("GMAIL_USER", "simrahapp@gmail.com")
         gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "abzqxqsrnavbgvta")
         yag = yagmail.SMTP(gmail_user, gmail_password)
-         yag.send(
+        yag.send(
             to=email,
             subject="Your Video Transcript is Ready! 📄",
             contents="""Hello!
