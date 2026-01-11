@@ -177,10 +177,18 @@ def convert_video():
             "outtmpl": "audio.%(ext)s",
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
+                "preferredcodec": "wav",
                 "preferredquality": "192",
             }],
-            "quiet": True
+            "quiet": True,
+            "nocheckcertificate": True,
+            "no_warnings": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "extractor_args": {
+                "youtube": {
+                    "skip": ["dash", "hls"]
+                }
+            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -256,9 +264,52 @@ def convert_upload():
     except Exception as e:
         print(f"Error: {str(e)}")
         # Clean up on error
-        if os.path.exists(video_path):
+        if 'video_path' in locals() and os.path.exists(video_path):
             os.remove(video_path)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/", methods=["GET"])
+def home():
+    """Home page with API information"""
+    return jsonify({
+        "service": "Video to PDF Converter API",
+        "version": "1.0",
+        "status": "running",
+        "endpoints": {
+            "/": "API information (this page)",
+            "/test": "Test endpoint to check if backend is running",
+            "/convert": "POST - Convert YouTube video URL to PDF",
+            "/convert-upload": "POST - Convert uploaded video file to PDF"
+        },
+        "usage": {
+            "/convert": {
+                "method": "POST",
+                "content_type": "application/json",
+                "body": {
+                    "video_url": "YouTube video URL",
+                    "email": "Email address to receive PDF"
+                }
+            },
+            "/convert-upload": {
+                "method": "POST",
+                "content_type": "multipart/form-data",
+                "body": {
+                    "video": "Video file (mp4, avi, mov, mkv, webm, flv)",
+                    "email": "Email address to receive PDF"
+                }
+            }
+        },
+        "features": [
+            "YouTube video downloading",
+            "Device video upload support",
+            "AI-powered speech-to-text (Vosk)",
+            "Professional PDF generation",
+            "Email delivery",
+            "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV"
+        ],
+        "powered_by": "Vosk AI + Flask + ReportLab",
+        "github": "https://github.com/simrahmad/video-to-pdf-backend"
+    })
 
 @app.route("/test", methods=["GET"])
 def test():
