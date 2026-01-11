@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
 from vosk import Model, KaldiRecognizer
 import wave
 import json
@@ -10,7 +10,7 @@ import yagmail
 import os
 from werkzeug.utils import secure_filename
 import subprocess
-import glob
+import re
 
 app = Flask(__name__)
 
@@ -35,103 +35,72 @@ ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def download_youtube_video(video_url):
-    """Download YouTube video using yt-dlp with advanced bot bypass"""
+def extract_video_id(url):
+    """Extract YouTube video ID from URL"""
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:embed\/)([0-9A-Za-z_-]{11})',
+        r'(?:watch\?v=)([0-9A-Za-z_-]{11})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_youtube_transcript(video_url):
+    """Get YouTube transcript using youtube-transcript-api"""
     try:
-        print(f"Downloading YouTube video: {video_url}")
+        print(f"Extracting transcript from YouTube: {video_url}")
         
-        # Advanced yt-dlp options with maximum bot bypass
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": "audio.%(ext)s",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-            "quiet": False,
-            "no_warnings": False,
-            "nocheckcertificate": True,
-            
-            # Advanced headers to appear as real browser
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "referer": "https://www.youtube.com/",
-            
-            "http_headers": {
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-us,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Cache-Control": "max-age=0"
-            },
-            
-            # Use multiple extraction methods
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web", "ios", "mweb"],
-                    "player_skip": ["webpage", "configs"],
-                    "skip": ["dash", "hls"]
-                }
-            },
-            
-            # Additional bypass options
-            "geo_bypass": True,
-            "age_limit": None,
-            "no_check_certificate": True,
-            
-            # Add delay to avoid rate limiting
-            "sleep_interval": 1,
-            "max_sleep_interval": 5,
-            
-            # Try multiple times
-            "retries": 10,
-            "fragment_retries": 10,
-            
-            # Use cookies if available (helps with authentication)
-            "cookiefile": None,  # We'll handle this differently
-        }
+        # Extract video ID
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            return None, "Could not extract video ID from URL"
         
-        print("Attempting download with yt-dlp...")
+        print(f"Video ID: {video_id}")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Try to get transcript
+        try:
+            # Try English first, then auto-generated, then any available
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to get manual English transcript first
             try:
-                info = ydl.extract_info(video_url, download=True)
-                print(f"Video info extracted: {info.get('title', 'Unknown')}")
-            except Exception as e:
-                error_msg = str(e)
-                print(f"yt-dlp error: {error_msg}")
-                
-                # Check if it's a specific error we can handle
-                if "Sign in to confirm you" in error_msg or "bot" in error_msg.lower():
-                    print("Detected bot protection. Trying alternative method...")
-                    
-                    # Try with android client only as fallback
-                    ydl_opts["extractor_args"]["youtube"]["player_client"] = ["android"]
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
-                        info = ydl2.extract_info(video_url, download=True)
-                else:
-                    raise e
-        
-        # Find the downloaded audio file
-        audio_files = glob.glob("audio.*")
-        if audio_files:
-            audio_file = audio_files[0]
-            print(f"Audio downloaded: {audio_file}")
-            return audio_file
-        else:
-            print("No audio file found after download")
-            return None
+                transcript = transcript_list.find_manually_created_transcript(['en'])
+                transcript_data = transcript.fetch()
+                print("Found manual English transcript")
+            except:
+                # Try auto-generated English
+                try:
+                    transcript = transcript_list.find_generated_transcript(['en'])
+                    transcript_data = transcript.fetch()
+                    print("Found auto-generated English transcript")
+                except:
+                    # Get any available transcript
+                    transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+                    transcript_data = transcript.fetch()
+                    print("Found available transcript")
             
+            # Combine all text from transcript
+            full_text = ' '.join([entry['text'] for entry in transcript_data])
+            
+            print(f"Transcript extracted: {len(full_text)} characters")
+            return full_text, None
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Transcript error: {error_msg}")
+            
+            if "Subtitles are disabled" in error_msg or "No transcripts" in error_msg:
+                return None, "This video doesn't have captions/subtitles available. Please use the Upload Video feature instead."
+            else:
+                return None, f"Could not get transcript: {error_msg}"
+        
     except Exception as e:
-        print(f"Error downloading video: {str(e)}")
-        return None
+        print(f"Error getting transcript: {str(e)}")
+        return None, str(e)
 
 def transcribe_audio(audio_file):
     """Transcribe audio using Vosk"""
@@ -174,23 +143,17 @@ def transcribe_audio(audio_file):
         print(f"Transcription error: {str(e)}")
         raise
 
-def process_video_to_pdf(audio_file, email):
-    """Common function to process audio and send PDF"""
+def create_pdf_from_text(text, title="Video Transcript"):
+    """Create PDF from text"""
     try:
-        # Convert speech to text using Vosk
-        print("Transcribing audio to text...")
-        text = transcribe_audio(audio_file)
-        print(f"Transcription complete! Length: {len(text)} characters")
-
-        if not text or len(text.strip()) < 10:
-            text = "Error: Could not extract meaningful text from the audio. Please ensure the video has clear speech."
-
-        # Create PDF from text
         print("Creating PDF...")
         pdf_file = "output.pdf"
         
         # Clean text
         clean_text = text.replace('\x00', '').strip()
+        
+        if not clean_text or len(clean_text) < 10:
+            clean_text = "Error: Could not extract meaningful text from the content."
         
         # Create PDF with ReportLab
         doc = SimpleDocTemplate(pdf_file, pagesize=letter,
@@ -200,8 +163,8 @@ def process_video_to_pdf(audio_file, email):
         story = []
         
         # Add title
-        title = Paragraph("<b>Video Transcript</b>", styles['Title'])
-        story.append(title)
+        title_para = Paragraph(f"<b>{title}</b>", styles['Title'])
+        story.append(title_para)
         story.append(Spacer(1, 30))
         
         # Format text for ReportLab
@@ -217,8 +180,15 @@ def process_video_to_pdf(audio_file, email):
         
         doc.build(story)
         print("PDF created successfully!")
+        return pdf_file
+        
+    except Exception as e:
+        print(f"PDF creation error: {str(e)}")
+        raise
 
-        # Send email with PDF attachment
+def send_email(email, pdf_file):
+    """Send email with PDF attachment"""
+    try:
         print(f"Sending email to {email}...")
         gmail_user = os.environ.get("GMAIL_USER", "simrahapp@gmail.com")
         gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "abzqxqsrnavbgvta")
@@ -240,21 +210,11 @@ Video to PDF Team
             attachments=pdf_file
         )
         print("Email sent successfully!")
-
-        # Clean up files
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-        if os.path.exists(pdf_file):
-            os.remove(pdf_file)
-        
-        return True, "PDF sent to email successfully!"
+        return True
         
     except Exception as e:
-        print(f"Error in processing: {str(e)}")
-        # Clean up on error
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
-        return False, str(e)
+        print(f"Email error: {str(e)}")
+        raise
 
 @app.route("/convert", methods=["POST"])
 def convert_video():
@@ -273,45 +233,43 @@ def convert_video():
         is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
         
         if is_youtube:
-            # Use yt-dlp for YouTube
-            print("Detected YouTube URL, using yt-dlp...")
-            audio_file = download_youtube_video(video_url)
+            # Use YouTube Transcript API
+            print("Detected YouTube URL, using Transcript API...")
+            text, error = get_youtube_transcript(video_url)
             
-            if not audio_file:
+            if error:
                 return jsonify({
                     "status": "error", 
-                    "message": "Failed to download YouTube video. YouTube has strict bot protection. Please try: 1) A different public video, 2) The Upload Video feature instead (recommended), or 3) Download the video first and upload it."
+                    "message": error
                 }), 500
-        else:
-            # For non-YouTube URLs, try direct download
-            print("Non-YouTube URL, attempting direct download...")
-            try:
-                import requests
-                response = requests.get(video_url, timeout=60, stream=True)
-                if response.status_code == 200:
-                    audio_file = "audio.mp4"
-                    with open(audio_file, 'wb') as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    print("Direct download successful!")
-                else:
-                    return jsonify({
-                        "status": "error", 
-                        "message": f"Failed to download video. HTTP {response.status_code}"
-                    }), 500
-            except Exception as e:
+            
+            if not text:
                 return jsonify({
                     "status": "error", 
-                    "message": f"Failed to download video: {str(e)}"
+                    "message": "Could not extract transcript from this video. It may not have captions available. Please use the Upload Video feature instead."
                 }), 500
-
-        # Process and send
-        success, message = process_video_to_pdf(audio_file, email)
-        
-        if success:
-            return jsonify({"status": "success", "message": message})
+            
+            # Create PDF from transcript
+            pdf_file = create_pdf_from_text(text, "YouTube Video Transcript")
+            
+            # Send email
+            send_email(email, pdf_file)
+            
+            # Clean up
+            if os.path.exists(pdf_file):
+                os.remove(pdf_file)
+            
+            return jsonify({
+                "status": "success", 
+                "message": "PDF sent to email successfully! (Used YouTube captions)"
+            })
+            
         else:
-            return jsonify({"status": "error", "message": message}), 500
+            # For non-YouTube URLs, inform user to use upload
+            return jsonify({
+                "status": "error", 
+                "message": "For non-YouTube videos, please use the Upload Video feature."
+            }), 400
 
     except Exception as e:
         error_msg = str(e)
@@ -358,23 +316,34 @@ def convert_upload():
         
         print("Audio extracted successfully!")
         
-        # Process and send
-        success, message = process_video_to_pdf(audio_file, email)
+        # Transcribe audio
+        print("Transcribing audio to text...")
+        text = transcribe_audio(audio_file)
+        print(f"Transcription complete! Length: {len(text)} characters")
         
-        # Clean up uploaded video
+        # Create PDF
+        pdf_file = create_pdf_from_text(text, "Uploaded Video Transcript")
+        
+        # Send email
+        send_email(email, pdf_file)
+        
+        # Clean up
         if os.path.exists(video_path):
             os.remove(video_path)
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+        if os.path.exists(pdf_file):
+            os.remove(pdf_file)
         
-        if success:
-            return jsonify({"status": "success", "message": message})
-        else:
-            return jsonify({"status": "error", "message": message}), 500
+        return jsonify({"status": "success", "message": "PDF sent to email successfully!"})
             
     except Exception as e:
         print(f"Error: {str(e)}")
         # Clean up on error
         if 'video_path' in locals() and os.path.exists(video_path):
             os.remove(video_path)
+        if 'audio_file' in locals() and os.path.exists(audio_file):
+            os.remove(audio_file)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
@@ -382,12 +351,12 @@ def home():
     """Home page with API information"""
     return jsonify({
         "service": "Video to PDF Converter API",
-        "version": "1.0",
+        "version": "2.0",
         "status": "running",
         "endpoints": {
             "/": "API information (this page)",
             "/test": "Test endpoint to check if backend is running",
-            "/convert": "POST - Convert YouTube video URL to PDF (using yt-dlp)",
+            "/convert": "POST - Convert YouTube video to PDF (using captions)",
             "/convert-upload": "POST - Convert uploaded video file to PDF"
         },
         "usage": {
@@ -395,9 +364,10 @@ def home():
                 "method": "POST",
                 "content_type": "application/json",
                 "body": {
-                    "video_url": "YouTube video URL or direct video link",
+                    "video_url": "YouTube video URL (must have captions)",
                     "email": "Email address to receive PDF"
-                }
+                },
+                "note": "Works only for YouTube videos with captions/subtitles"
             },
             "/convert-upload": {
                 "method": "POST",
@@ -405,25 +375,26 @@ def home():
                 "body": {
                     "video": "Video file (mp4, avi, mov, mkv, webm, flv)",
                     "email": "Email address to receive PDF"
-                }
+                },
+                "note": "Works for all video formats"
             }
         },
         "features": [
-            "YouTube video downloading (yt-dlp with advanced bot bypass)",
-            "Direct video URL support",
-            "Device video upload support (recommended)",
-            "AI-powered speech-to-text (Vosk)",
+            "YouTube transcript extraction (FREE - uses official captions)",
+            "Device video upload support",
+            "AI-powered speech-to-text (Vosk) for uploaded videos",
             "Professional PDF generation",
             "Email delivery",
-            "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV"
+            "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV",
+            "No API costs or rate limits"
         ],
-        "powered_by": "yt-dlp + Vosk AI + Flask + ReportLab",
+        "powered_by": "YouTube Transcript API + Vosk AI + Flask + ReportLab",
         "github": "https://github.com/simrahmad/video-to-pdf-backend"
     })
 
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running with Vosk and yt-dlp!"})
+    return jsonify({"status": "success", "message": "Backend is running with YouTube Transcript API and Vosk!"})
 
 if __name__ == "__main__":
     import os
