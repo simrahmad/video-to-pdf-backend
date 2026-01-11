@@ -32,7 +32,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
 
 # RapidAPI Configuration
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "66dc87af19msh2832aa357e08fa2p14246ejsn6ec31120bb29")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "aff5b56eaamsh561b283d1252be3p1b2219jsn1b2c680e7385")
 RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
 
 def allowed_file(filename):
