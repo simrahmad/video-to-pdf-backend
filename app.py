@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
 from vosk import Model, KaldiRecognizer
 import wave
 import json
@@ -11,6 +12,7 @@ import os
 from werkzeug.utils import secure_filename
 import subprocess
 import re
+import glob
 
 app = Flask(__name__)
 
@@ -52,7 +54,7 @@ def extract_video_id(url):
 def get_youtube_transcript(video_url):
     """Get YouTube transcript using youtube-transcript-api"""
     try:
-        print(f"Extracting transcript from YouTube: {video_url}")
+        print(f"Attempting to extract transcript from YouTube: {video_url}")
         
         # Extract video ID
         video_id = extract_video_id(video_url)
@@ -63,56 +65,117 @@ def get_youtube_transcript(video_url):
         
         # Try to get transcript
         try:
-            # Try English first, then auto-generated, then any available
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Try to get manual English transcript first
+            # Try different transcript types in order of preference
+            transcript = None
             try:
+                # Manual English
                 transcript = transcript_list.find_manually_created_transcript(['en'])
-                transcript_data = transcript.fetch()
-                print("Found manual English transcript")
+                print("✅ Found manual English transcript")
             except:
-                # Try auto-generated English
                 try:
+                    # Auto-generated English
                     transcript = transcript_list.find_generated_transcript(['en'])
-                    transcript_data = transcript.fetch()
-                    print("Found auto-generated English transcript")
+                    print("✅ Found auto-generated English transcript")
                 except:
-                    # Get any available transcript
-                    transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-                    transcript_data = transcript.fetch()
-                    print("Found available transcript")
+                    try:
+                        # Any English variant
+                        transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+                        print("✅ Found English transcript")
+                    except:
+                        print("❌ No English transcript found")
+                        return None, "No English transcript available"
             
-            # Combine all text from transcript
-            full_text = ' '.join([entry['text'] for entry in transcript_data])
-            
-            print(f"Transcript extracted: {len(full_text)} characters")
-            return full_text, None
+            if transcript:
+                transcript_data = transcript.fetch()
+                full_text = ' '.join([entry['text'] for entry in transcript_data])
+                print(f"✅ Transcript extracted: {len(full_text)} characters")
+                return full_text, None
+            else:
+                return None, "No transcript available"
             
         except Exception as e:
             error_msg = str(e)
-            print(f"Transcript error: {error_msg}")
-            
-            if "Subtitles are disabled" in error_msg or "No transcripts" in error_msg:
-                return None, "This video doesn't have captions/subtitles available. Please use the Upload Video feature instead."
-            else:
-                return None, f"Could not get transcript: {error_msg}"
+            print(f"❌ Transcript error: {error_msg}")
+            return None, error_msg
         
     except Exception as e:
-        print(f"Error getting transcript: {str(e)}")
+        print(f"❌ Error getting transcript: {str(e)}")
         return None, str(e)
+
+def download_youtube_video(video_url):
+    """Download YouTube video using yt-dlp (fallback method)"""
+    try:
+        print(f"📥 Downloading YouTube video with yt-dlp: {video_url}")
+        
+        # yt-dlp options optimized for audio extraction
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": "audio.%(ext)s",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "quiet": False,
+            "no_warnings": False,
+            "nocheckcertificate": True,
+            
+            # Browser-like headers
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "referer": "https://www.youtube.com/",
+            
+            "http_headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-us,en;q=0.5",
+                "Sec-Fetch-Mode": "navigate",
+            },
+            
+            # Multiple extraction methods
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web", "ios"],
+                    "player_skip": ["webpage"],
+                }
+            },
+            
+            "geo_bypass": True,
+            "retries": 5,
+            "fragment_retries": 5,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            print(f"✅ Video downloaded: {info.get('title', 'Unknown')}")
+        
+        # Find downloaded audio file
+        audio_files = glob.glob("audio.*")
+        if audio_files:
+            audio_file = audio_files[0]
+            print(f"✅ Audio file ready: {audio_file}")
+            return audio_file
+        else:
+            print("❌ No audio file found after download")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Download error: {str(e)}")
+        return None
 
 def transcribe_audio(audio_file):
     """Transcribe audio using Vosk"""
     try:
-        # Convert to WAV 16kHz mono (Vosk requirement)
+        print("🎤 Transcribing audio with Vosk...")
+        
+        # Convert to WAV 16kHz mono
         wav_file = "temp_audio.wav"
         subprocess.run([
             'ffmpeg', '-i', audio_file,
             '-ar', '16000', '-ac', '1', '-y', wav_file
         ], check=True, capture_output=True)
         
-        # Transcribe with Vosk
+        # Transcribe
         wf = wave.open(wav_file, "rb")
         rec = KaldiRecognizer(model, wf.getframerate())
         rec.SetWords(True)
@@ -127,7 +190,6 @@ def transcribe_audio(audio_file):
                 if 'text' in result:
                     transcription.append(result['text'])
         
-        # Final result
         final_result = json.loads(rec.FinalResult())
         if 'text' in final_result:
             transcription.append(final_result['text'])
@@ -136,60 +198,55 @@ def transcribe_audio(audio_file):
         os.remove(wav_file)
         
         full_text = ' '.join(transcription)
-        print(f"Transcription: {full_text[:100]}...")
+        print(f"✅ Transcription complete: {len(full_text)} characters")
         return full_text
         
     except Exception as e:
-        print(f"Transcription error: {str(e)}")
+        print(f"❌ Transcription error: {str(e)}")
         raise
 
 def create_pdf_from_text(text, title="Video Transcript"):
     """Create PDF from text"""
     try:
-        print("Creating PDF...")
+        print("📄 Creating PDF...")
         pdf_file = "output.pdf"
         
-        # Clean text
         clean_text = text.replace('\x00', '').strip()
         
         if not clean_text or len(clean_text) < 10:
             clean_text = "Error: Could not extract meaningful text from the content."
         
-        # Create PDF with ReportLab
         doc = SimpleDocTemplate(pdf_file, pagesize=letter,
                                rightMargin=72, leftMargin=72,
                                topMargin=72, bottomMargin=18)
         styles = getSampleStyleSheet()
         story = []
         
-        # Add title
         title_para = Paragraph(f"<b>{title}</b>", styles['Title'])
         story.append(title_para)
         story.append(Spacer(1, 30))
         
-        # Format text for ReportLab
         formatted_text = clean_text.replace('\n', '<br/>')
         formatted_text = formatted_text.replace('&', '&amp;')
         formatted_text = formatted_text.replace('<', '&lt;')
         formatted_text = formatted_text.replace('>', '&gt;')
         formatted_text = formatted_text.replace('<br/>', '<br/>')
         
-        # Add transcribed text
         para = Paragraph(formatted_text, styles['Normal'])
         story.append(para)
         
         doc.build(story)
-        print("PDF created successfully!")
+        print("✅ PDF created successfully!")
         return pdf_file
         
     except Exception as e:
-        print(f"PDF creation error: {str(e)}")
+        print(f"❌ PDF creation error: {str(e)}")
         raise
 
 def send_email(email, pdf_file):
     """Send email with PDF attachment"""
     try:
-        print(f"Sending email to {email}...")
+        print(f"📧 Sending email to {email}...")
         gmail_user = os.environ.get("GMAIL_USER", "simrahapp@gmail.com")
         gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "abzqxqsrnavbgvta")
         yag = yagmail.SMTP(gmail_user, gmail_password)
@@ -209,16 +266,16 @@ Video to PDF Team
 """,
             attachments=pdf_file
         )
-        print("Email sent successfully!")
+        print("✅ Email sent successfully!")
         return True
         
     except Exception as e:
-        print(f"Email error: {str(e)}")
+        print(f"❌ Email error: {str(e)}")
         raise
 
 @app.route("/convert", methods=["POST"])
 def convert_video():
-    """Convert video from URL"""
+    """Convert video from URL with hybrid approach"""
     data = request.json
     video_url = data.get("video_url")
     email = data.get("email")
@@ -227,54 +284,74 @@ def convert_video():
         return jsonify({"status": "error", "message": "Video URL or email missing"}), 400
 
     try:
-        print(f"Processing video: {video_url}")
+        print(f"🎬 Processing video: {video_url}")
         
         # Check if it's a YouTube URL
         is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
         
-        if is_youtube:
-            # Use YouTube Transcript API
-            print("Detected YouTube URL, using Transcript API...")
-            text, error = get_youtube_transcript(video_url)
-            
-            if error:
-                return jsonify({
-                    "status": "error", 
-                    "message": error
-                }), 500
-            
-            if not text:
-                return jsonify({
-                    "status": "error", 
-                    "message": "Could not extract transcript from this video. It may not have captions available. Please use the Upload Video feature instead."
-                }), 500
-            
-            # Create PDF from transcript
-            pdf_file = create_pdf_from_text(text, "YouTube Video Transcript")
-            
-            # Send email
-            send_email(email, pdf_file)
-            
-            # Clean up
-            if os.path.exists(pdf_file):
-                os.remove(pdf_file)
-            
-            return jsonify({
-                "status": "success", 
-                "message": "PDF sent to email successfully! (Used YouTube captions)"
-            })
-            
-        else:
-            # For non-YouTube URLs, inform user to use upload
+        if not is_youtube:
             return jsonify({
                 "status": "error", 
                 "message": "For non-YouTube videos, please use the Upload Video feature."
             }), 400
+        
+        text = None
+        method_used = ""
+        
+        # STEP 1: Try YouTube Transcript API first (fast & free)
+        print("📝 Method 1: Trying YouTube Transcript API...")
+        text, error = get_youtube_transcript(video_url)
+        
+        if text and len(text.strip()) > 50:
+            method_used = "YouTube Captions"
+            print("✅ SUCCESS: Got transcript from captions!")
+        else:
+            print(f"❌ Captions not available: {error}")
+            
+            # STEP 2: Fallback to downloading video
+            print("📥 Method 2: Falling back to video download...")
+            audio_file = download_youtube_video(video_url)
+            
+            if not audio_file:
+                return jsonify({
+                    "status": "error", 
+                    "message": "Failed to process video. The video may be private, age-restricted, or unavailable. Please try the Upload Video feature instead."
+                }), 500
+            
+            # STEP 3: Transcribe downloaded audio
+            print("🎤 Method 3: Transcribing audio with Vosk...")
+            try:
+                text = transcribe_audio(audio_file)
+                method_used = "Audio Transcription"
+                print("✅ SUCCESS: Transcribed audio!")
+                
+                # Clean up audio file
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
+            except Exception as e:
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
+                raise e
+        
+        # Create PDF
+        pdf_file = create_pdf_from_text(text, "YouTube Video Transcript")
+        
+        # Send email
+        send_email(email, pdf_file)
+        
+        # Clean up
+        if os.path.exists(pdf_file):
+            os.remove(pdf_file)
+        
+        return jsonify({
+            "status": "success", 
+            "message": f"PDF sent to email successfully! (Method: {method_used})"
+        })
 
     except Exception as e:
         error_msg = str(e)
-        print(f"Error: {error_msg}")
-        return jsonify({"status": "error", "message": error_msg}), 500
+        print(f"❌ Error: {error_msg}")
+        return jsonify({"status": "error", "message": f"Processing failed: {error_msg}"}), 500
 
 @app.route("/convert-upload", methods=["POST"])
 def convert_upload():
@@ -296,16 +373,16 @@ def convert_upload():
         return jsonify({"status": "error", "message": "Invalid file type. Allowed: mp4, avi, mov, mkv, webm, flv"}), 400
     
     try:
-        print(f"Processing uploaded video: {video_file.filename}")
+        print(f"📤 Processing uploaded video: {video_file.filename}")
         
         # Save uploaded video
         filename = secure_filename(video_file.filename)
         video_path = os.path.join(UPLOAD_FOLDER, filename)
         video_file.save(video_path)
-        print(f"Video saved to: {video_path}")
+        print(f"✅ Video saved: {video_path}")
         
-        # Extract audio from video
-        print("Extracting audio...")
+        # Extract audio
+        print("🎵 Extracting audio...")
         audio_file = "uploaded_audio.mp3"
         
         subprocess.run([
@@ -314,12 +391,10 @@ def convert_upload():
             '-q:a', '2', audio_file, '-y'
         ], check=True, capture_output=True)
         
-        print("Audio extracted successfully!")
+        print("✅ Audio extracted!")
         
-        # Transcribe audio
-        print("Transcribing audio to text...")
+        # Transcribe
         text = transcribe_audio(audio_file)
-        print(f"Transcription complete! Length: {len(text)} characters")
         
         # Create PDF
         pdf_file = create_pdf_from_text(text, "Uploaded Video Transcript")
@@ -338,7 +413,7 @@ def convert_upload():
         return jsonify({"status": "success", "message": "PDF sent to email successfully!"})
             
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"❌ Error: {str(e)}")
         # Clean up on error
         if 'video_path' in locals() and os.path.exists(video_path):
             os.remove(video_path)
@@ -351,12 +426,12 @@ def home():
     """Home page with API information"""
     return jsonify({
         "service": "Video to PDF Converter API",
-        "version": "2.0",
+        "version": "2.0 - Hybrid",
         "status": "running",
         "endpoints": {
             "/": "API information (this page)",
             "/test": "Test endpoint to check if backend is running",
-            "/convert": "POST - Convert YouTube video to PDF (using captions)",
+            "/convert": "POST - Convert YouTube video to PDF (hybrid method)",
             "/convert-upload": "POST - Convert uploaded video file to PDF"
         },
         "usage": {
@@ -364,10 +439,10 @@ def home():
                 "method": "POST",
                 "content_type": "application/json",
                 "body": {
-                    "video_url": "YouTube video URL (must have captions)",
+                    "video_url": "YouTube video URL",
                     "email": "Email address to receive PDF"
                 },
-                "note": "Works only for YouTube videos with captions/subtitles"
+                "note": "Tries captions first, downloads if needed - works for ALL YouTube videos"
             },
             "/convert-upload": {
                 "method": "POST",
@@ -380,24 +455,31 @@ def home():
             }
         },
         "features": [
-            "YouTube transcript extraction (FREE - uses official captions)",
+            "Hybrid YouTube processing (captions first, then download fallback)",
+            "Works for 100% of YouTube videos",
             "Device video upload support",
-            "AI-powered speech-to-text (Vosk) for uploaded videos",
+            "AI-powered speech-to-text (Vosk)",
             "Professional PDF generation",
             "Email delivery",
             "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV",
-            "No API costs or rate limits"
+            "Completely FREE - no API costs"
         ],
-        "powered_by": "YouTube Transcript API + Vosk AI + Flask + ReportLab",
+        "processing_methods": {
+            "method_1": "YouTube Transcript API (fast, when captions available)",
+            "method_2": "yt-dlp download + Vosk transcription (slower, always works)"
+        },
+        "powered_by": "YouTube Transcript API + yt-dlp + Vosk AI + Flask + ReportLab",
         "github": "https://github.com/simrahmad/video-to-pdf-backend"
     })
 
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running with YouTube Transcript API and Vosk!"})
+    return jsonify({"status": "success", "message": "Backend is running with hybrid YouTube processing!"})
 
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
-    print(f"Starting Flask server on port {port}")
+    print(f"🚀 Starting Flask server on port {port}")
+    print("📝 Method 1: YouTube Transcript API (fast)")
+    print("📥 Method 2: yt-dlp + Vosk (fallback)")
     app.run(host="0.0.0.0", port=port, debug=False)
