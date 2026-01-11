@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests
+import yt_dlp
 from vosk import Model, KaldiRecognizer
 import wave
 import json
@@ -10,6 +10,7 @@ import yagmail
 import os
 from werkzeug.utils import secure_filename
 import subprocess
+import glob
 
 app = Flask(__name__)
 
@@ -31,95 +32,105 @@ if not os.path.exists(UPLOAD_FOLDER):
 
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
 
-# RapidAPI Configuration
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "aff5b56eaamsh561b283d1252be3p1b2219jsn1b2c680e7385")
-RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def extract_video_id(url):
-    """Extract YouTube video ID from URL"""
-    if "youtu.be/" in url:
-        return url.split("youtu.be/")[1].split("?")[0]
-    elif "youtube.com/watch?v=" in url:
-        return url.split("v=")[1].split("&")[0]
-    return None
-
-def download_youtube_with_rapidapi(video_url):
-    """Download YouTube video using RapidAPI"""
+def download_youtube_video(video_url):
+    """Download YouTube video using yt-dlp with advanced bot bypass"""
     try:
-        print(f"Downloading YouTube video via RapidAPI: {video_url}")
+        print(f"Downloading YouTube video: {video_url}")
         
-        # Extract video ID
-        video_id = extract_video_id(video_url)
-        if not video_id:
-            print("Could not extract video ID from URL")
-            return None
-        
-        print(f"Video ID: {video_id}")
-        
-        # Call RapidAPI to get video info and download links
-        api_url = f"https://{RAPIDAPI_HOST}/v2/video/details"
-        
-        querystring = {"videoId": video_id}
-        
-        headers = {
-            "x-rapidapi-key": RAPIDAPI_KEY,
-            "x-rapidapi-host": RAPIDAPI_HOST
+        # Advanced yt-dlp options with maximum bot bypass
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": "audio.%(ext)s",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "quiet": False,
+            "no_warnings": False,
+            "nocheckcertificate": True,
+            
+            # Advanced headers to appear as real browser
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "referer": "https://www.youtube.com/",
+            
+            "http_headers": {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-us,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0"
+            },
+            
+            # Use multiple extraction methods
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web", "ios", "mweb"],
+                    "player_skip": ["webpage", "configs"],
+                    "skip": ["dash", "hls"]
+                }
+            },
+            
+            # Additional bypass options
+            "geo_bypass": True,
+            "age_limit": None,
+            "no_check_certificate": True,
+            
+            # Add delay to avoid rate limiting
+            "sleep_interval": 1,
+            "max_sleep_interval": 5,
+            
+            # Try multiple times
+            "retries": 10,
+            "fragment_retries": 10,
+            
+            # Use cookies if available (helps with authentication)
+            "cookiefile": None,  # We'll handle this differently
         }
         
-        print("Calling RapidAPI...")
-        response = requests.get(api_url, headers=headers, params=querystring, timeout=30)
+        print("Attempting download with yt-dlp...")
         
-        if response.status_code != 200:
-            print(f"RapidAPI error: {response.status_code}")
-            print(f"Response: {response.text}")
-            return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                info = ydl.extract_info(video_url, download=True)
+                print(f"Video info extracted: {info.get('title', 'Unknown')}")
+            except Exception as e:
+                error_msg = str(e)
+                print(f"yt-dlp error: {error_msg}")
+                
+                # Check if it's a specific error we can handle
+                if "Sign in to confirm you" in error_msg or "bot" in error_msg.lower():
+                    print("Detected bot protection. Trying alternative method...")
+                    
+                    # Try with android client only as fallback
+                    ydl_opts["extractor_args"]["youtube"]["player_client"] = ["android"]
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        info = ydl2.extract_info(video_url, download=True)
+                else:
+                    raise e
         
-        data = response.json()
-        print(f"RapidAPI response received")
-        
-        # Extract audio download URL
-        # Try to find audio format
-        audio_url = None
-        
-        # Check if there are downloadable formats
-        if "videos" in data and "items" in data["videos"]:
-            items = data["videos"]["items"]
-            # Look for audio-only format or lowest quality video with audio
-            for item in items:
-                if "audioOnly" in item and item.get("audioOnly"):
-                    audio_url = item.get("url")
-                    break
-            
-            # If no audio-only, get lowest quality video
-            if not audio_url and len(items) > 0:
-                audio_url = items[-1].get("url")
-        
-        if not audio_url:
-            print("Could not find download URL in RapidAPI response")
-            return None
-        
-        print(f"Found download URL: {audio_url[:50]}...")
-        
-        # Download the audio/video file
-        print("Downloading audio from URL...")
-        download_response = requests.get(audio_url, timeout=120, stream=True)
-        
-        if download_response.status_code == 200:
-            audio_file = "audio.mp4"
-            with open(audio_file, 'wb') as f:
-                for chunk in download_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"Audio downloaded successfully: {audio_file}")
+        # Find the downloaded audio file
+        audio_files = glob.glob("audio.*")
+        if audio_files:
+            audio_file = audio_files[0]
+            print(f"Audio downloaded: {audio_file}")
             return audio_file
         else:
-            print(f"Failed to download audio: {download_response.status_code}")
+            print("No audio file found after download")
             return None
             
     except Exception as e:
-        print(f"Error downloading with RapidAPI: {str(e)}")
+        print(f"Error downloading video: {str(e)}")
         return None
 
 def transcribe_audio(audio_file):
@@ -262,19 +273,20 @@ def convert_video():
         is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
         
         if is_youtube:
-            # Use RapidAPI for YouTube
-            print("Detected YouTube URL, using RapidAPI...")
-            audio_file = download_youtube_with_rapidapi(video_url)
+            # Use yt-dlp for YouTube
+            print("Detected YouTube URL, using yt-dlp...")
+            audio_file = download_youtube_video(video_url)
             
             if not audio_file:
                 return jsonify({
                     "status": "error", 
-                    "message": "Failed to download YouTube video. The video may be private, age-restricted, or temporarily unavailable. Please try a different public video or use the Upload feature."
+                    "message": "Failed to download YouTube video. YouTube has strict bot protection. Please try: 1) A different public video, 2) The Upload Video feature instead (recommended), or 3) Download the video first and upload it."
                 }), 500
         else:
             # For non-YouTube URLs, try direct download
             print("Non-YouTube URL, attempting direct download...")
             try:
+                import requests
                 response = requests.get(video_url, timeout=60, stream=True)
                 if response.status_code == 200:
                     audio_file = "audio.mp4"
@@ -375,7 +387,7 @@ def home():
         "endpoints": {
             "/": "API information (this page)",
             "/test": "Test endpoint to check if backend is running",
-            "/convert": "POST - Convert YouTube video URL to PDF (via RapidAPI)",
+            "/convert": "POST - Convert YouTube video URL to PDF (using yt-dlp)",
             "/convert-upload": "POST - Convert uploaded video file to PDF"
         },
         "usage": {
@@ -397,21 +409,21 @@ def home():
             }
         },
         "features": [
-            "YouTube video downloading (via RapidAPI - 100 requests/month free)",
+            "YouTube video downloading (yt-dlp with advanced bot bypass)",
             "Direct video URL support",
-            "Device video upload support",
+            "Device video upload support (recommended)",
             "AI-powered speech-to-text (Vosk)",
             "Professional PDF generation",
             "Email delivery",
             "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV"
         ],
-        "powered_by": "RapidAPI + Vosk AI + Flask + ReportLab",
+        "powered_by": "yt-dlp + Vosk AI + Flask + ReportLab",
         "github": "https://github.com/simrahmad/video-to-pdf-backend"
     })
 
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running with Vosk and RapidAPI!"})
+    return jsonify({"status": "success", "message": "Backend is running with Vosk and yt-dlp!"})
 
 if __name__ == "__main__":
     import os
