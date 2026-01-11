@@ -10,7 +10,6 @@ import yagmail
 import os
 from werkzeug.utils import secure_filename
 import subprocess
-import time
 
 app = Flask(__name__)
 
@@ -32,66 +31,95 @@ if not os.path.exists(UPLOAD_FOLDER):
 
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'webm', 'flv'}
 
+# RapidAPI Configuration
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "66dc87af19msh2832aa357e08fa2p14246ejsn6ec31120bb29")
+RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def download_youtube_with_cobalt(video_url):
-    """Download YouTube video using cobalt.tools API (bypasses bot detection)"""
+def extract_video_id(url):
+    """Extract YouTube video ID from URL"""
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[1].split("?")[0]
+    elif "youtube.com/watch?v=" in url:
+        return url.split("v=")[1].split("&")[0]
+    return None
+
+def download_youtube_with_rapidapi(video_url):
+    """Download YouTube video using RapidAPI"""
     try:
-        print(f"Downloading YouTube video via Cobalt API: {video_url}")
+        print(f"Downloading YouTube video via RapidAPI: {video_url}")
         
-        # Use cobalt.tools API (free service that bypasses YouTube bot detection)
-        cobalt_api = "https://api.cobalt.tools/api/json"
+        # Extract video ID
+        video_id = extract_video_id(video_url)
+        if not video_id:
+            print("Could not extract video ID from URL")
+            return None
+        
+        print(f"Video ID: {video_id}")
+        
+        # Call RapidAPI to get video info and download links
+        api_url = f"https://{RAPIDAPI_HOST}/v2/video/details"
+        
+        querystring = {"videoId": video_id}
         
         headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
+            "x-rapidapi-key": RAPIDAPI_KEY,
+            "x-rapidapi-host": RAPIDAPI_HOST
         }
         
-        payload = {
-            "url": video_url,
-            "vCodec": "h264",
-            "vQuality": "720",
-            "aFormat": "mp3",
-            "isAudioOnly": True
-        }
-        
-        # Request download from cobalt
-        response = requests.post(cobalt_api, json=payload, headers=headers, timeout=30)
+        print("Calling RapidAPI...")
+        response = requests.get(api_url, headers=headers, params=querystring, timeout=30)
         
         if response.status_code != 200:
-            print(f"Cobalt API error: {response.status_code}")
+            print(f"RapidAPI error: {response.status_code}")
+            print(f"Response: {response.text}")
             return None
         
         data = response.json()
-        print(f"Cobalt response: {data}")
+        print(f"RapidAPI response received")
         
-        # Get the audio download URL
-        if data.get("status") == "redirect" or data.get("status") == "stream":
-            audio_url = data.get("url")
-            if not audio_url:
-                print("No audio URL in Cobalt response")
-                return None
+        # Extract audio download URL
+        # Try to find audio format
+        audio_url = None
+        
+        # Check if there are downloadable formats
+        if "videos" in data and "items" in data["videos"]:
+            items = data["videos"]["items"]
+            # Look for audio-only format or lowest quality video with audio
+            for item in items:
+                if "audioOnly" in item and item.get("audioOnly"):
+                    audio_url = item.get("url")
+                    break
             
-            # Download the audio file
-            print(f"Downloading audio from: {audio_url}")
-            audio_response = requests.get(audio_url, timeout=60)
-            
-            if audio_response.status_code == 200:
-                audio_file = "audio.mp3"
-                with open(audio_file, 'wb') as f:
-                    f.write(audio_response.content)
-                print(f"Audio downloaded successfully: {audio_file}")
-                return audio_file
-            else:
-                print(f"Failed to download audio: {audio_response.status_code}")
-                return None
+            # If no audio-only, get lowest quality video
+            if not audio_url and len(items) > 0:
+                audio_url = items[-1].get("url")
+        
+        if not audio_url:
+            print("Could not find download URL in RapidAPI response")
+            return None
+        
+        print(f"Found download URL: {audio_url[:50]}...")
+        
+        # Download the audio/video file
+        print("Downloading audio from URL...")
+        download_response = requests.get(audio_url, timeout=120, stream=True)
+        
+        if download_response.status_code == 200:
+            audio_file = "audio.mp4"
+            with open(audio_file, 'wb') as f:
+                for chunk in download_response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"Audio downloaded successfully: {audio_file}")
+            return audio_file
         else:
-            print(f"Cobalt API returned unexpected status: {data.get('status')}")
+            print(f"Failed to download audio: {download_response.status_code}")
             return None
             
     except Exception as e:
-        print(f"Error downloading with Cobalt: {str(e)}")
+        print(f"Error downloading with RapidAPI: {str(e)}")
         return None
 
 def transcribe_audio(audio_file):
@@ -234,14 +262,14 @@ def convert_video():
         is_youtube = "youtube.com" in video_url or "youtu.be" in video_url
         
         if is_youtube:
-            # Use Cobalt API for YouTube (bypasses bot detection)
-            print("Detected YouTube URL, using Cobalt API...")
-            audio_file = download_youtube_with_cobalt(video_url)
+            # Use RapidAPI for YouTube
+            print("Detected YouTube URL, using RapidAPI...")
+            audio_file = download_youtube_with_rapidapi(video_url)
             
             if not audio_file:
                 return jsonify({
                     "status": "error", 
-                    "message": "Failed to download YouTube video. The video may be restricted or private. Please try: 1) A different public video, 2) Using the Upload feature instead."
+                    "message": "Failed to download YouTube video. The video may be private, age-restricted, or temporarily unavailable. Please try a different public video or use the Upload feature."
                 }), 500
         else:
             # For non-YouTube URLs, try direct download
@@ -347,7 +375,7 @@ def home():
         "endpoints": {
             "/": "API information (this page)",
             "/test": "Test endpoint to check if backend is running",
-            "/convert": "POST - Convert YouTube video URL to PDF (via Cobalt API)",
+            "/convert": "POST - Convert YouTube video URL to PDF (via RapidAPI)",
             "/convert-upload": "POST - Convert uploaded video file to PDF"
         },
         "usage": {
@@ -369,7 +397,7 @@ def home():
             }
         },
         "features": [
-            "YouTube video downloading (via Cobalt API - bypasses bot detection)",
+            "YouTube video downloading (via RapidAPI - 100 requests/month free)",
             "Direct video URL support",
             "Device video upload support",
             "AI-powered speech-to-text (Vosk)",
@@ -377,13 +405,13 @@ def home():
             "Email delivery",
             "Supported formats: MP4, AVI, MOV, MKV, WEBM, FLV"
         ],
-        "powered_by": "Cobalt.tools + Vosk AI + Flask + ReportLab",
+        "powered_by": "RapidAPI + Vosk AI + Flask + ReportLab",
         "github": "https://github.com/simrahmad/video-to-pdf-backend"
     })
 
 @app.route("/test", methods=["GET"])
 def test():
-    return jsonify({"status": "success", "message": "Backend is running with Vosk and Cobalt API!"})
+    return jsonify({"status": "success", "message": "Backend is running with Vosk and RapidAPI!"})
 
 if __name__ == "__main__":
     import os
